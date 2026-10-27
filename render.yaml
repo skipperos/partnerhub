@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: partner-hub-api
+    runtime: node
+    rootDir: server
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: 22
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: ADMIN_EMAILS
+        sync: false
+      - key: APP_ORIGINS
+        sync: false
+      - key: PUBLIC_API_ORIGIN
+        sync: false
+      - key: CRON_SECRET
+        generateValue: true
