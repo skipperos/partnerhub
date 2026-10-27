@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "node --watch src/index.js",
     "start": "node src/index.js",
-    "check": "node --check src/index.js && node --check src/finance.js"
+    "check": "node --check src/index.js && node --check src/finance.js && node --check src/payment-engine.js && node --check src/paystack.js"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.8",
@@ -14,5 +14,7 @@
     "pg": "^8.13.1",
     "zod": "^3.24.1"
   },
-  "engines": { "node": ">=20" }
+  "engines": {
+    "node": ">=20"
+  }
 }

@@ -1,3 +1,11 @@
+# Partner Hub V2 — Central Paystack Payment Engine
+
+**Start here: [PAYMENT_ENGINE_V2.md](PAYMENT_ENGINE_V2.md)** for the safe additive Supabase migration, Render/Vercel deployment, API integration and testing. The original V1 source, admin accounts, partners and referral functionality are retained.
+
+**IMPORTANT:** Test-mode checkout is provided; subscriptions, automatic refunds/chargebacks, and specific product fulfillment must be completed and tested before live rollout. No live Paystack settings are changed by this package.
+
+---
+
 # PARTNER HUB
 
 **Built for the hungry.** A branded affiliate-sales management web platform built with **Supabase + Vercel + Render**.

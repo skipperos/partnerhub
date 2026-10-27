@@ -24,3 +24,11 @@ services:
         sync: false
       - key: CRON_SECRET
         generateValue: true
+      - key: PAYSTACK_MODE
+        value: test
+      - key: PAYMENTS_LIVE_ENABLED
+        value: false
+      - key: PAYSTACK_SECRET_KEY
+        sync: false
+      - key: PRODUCT_ORIGINS
+        sync: false

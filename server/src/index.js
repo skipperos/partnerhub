@@ -7,6 +7,7 @@ import { secureHeaders } from 'hono/secure-headers';
 import { createClient } from '@supabase/supabase-js';
 import pg from 'pg';
 import { z, ZodError } from 'zod';
+import { attachPaymentEngine } from './payment-engine.js';
 import { approveMatured, cancelDraftPayout, createPayout, recordVerifiedPayment, recordVerifiedRefund, withTx, writeEvent } from './finance.js';
 
 const { Pool } = pg;
@@ -16,10 +17,10 @@ if(process.env.NODE_ENV==='production' && (!process.env.ADMIN_EMAILS.trim() || !
 const pool=new Pool({connectionString:process.env.DATABASE_URL,max:12,ssl:/localhost|127\.0\.0\.1/.test(new URL(process.env.DATABASE_URL).hostname)?false:{rejectUnauthorized:true, ...(process.env.DATABASE_CA_CERT?{ca:process.env.DATABASE_CA_CERT.replace(/\\n/g,'\n')}: {})},idleTimeoutMillis:30000});
 const auth=createClient(process.env.SUPABASE_URL,process.env.SUPABASE_ANON_KEY,{auth:{persistSession:false,autoRefreshToken:false,detectSessionInUrl:false}});
 const adminEmails=new Set(process.env.ADMIN_EMAILS.split(',').map(x=>x.trim().toLowerCase()).filter(Boolean));
-const allowedOrigins=new Set(process.env.APP_ORIGINS.split(',').map(x=>x.trim().replace(/\/$/,'')).filter(Boolean));
+const allowedOrigins=new Set([process.env.APP_ORIGINS,process.env.PRODUCT_ORIGINS||''].join(',').split(',').map(x=>x.trim().replace(/\/$/,'')).filter(Boolean));
 const app=new Hono();
 app.use('*',secureHeaders());
-app.use('/api/*',cors({origin: origin=>allowedOrigins.has(origin)?origin:null,allowHeaders:['Authorization','Content-Type','X-Product-Key','X-Cron-Secret'],allowMethods:['GET','POST','PATCH','OPTIONS'],maxAge:600}));
+app.use('/api/*',cors({origin: origin=>allowedOrigins.has(origin)?origin:null,allowHeaders:['Authorization','Content-Type','X-Product-Key','X-Order-Token','X-Cron-Secret'],allowMethods:['GET','POST','PATCH','OPTIONS'],maxAge:600}));
 
 const err=(m,status=400)=>Object.assign(new Error(m),{status});
 const clean=(v)=>String(v??'').trim();
@@ -29,9 +30,9 @@ const plainUrl=(url)=>{const u=new URL(url);if(!['https:','http:'].includes(u.pr
 const slugify=s=>clean(s).toLowerCase().replace(/[^a-z0-9-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,70);
 const createCode=()=>crypto.randomBytes(14).toString('base64url');
 const hash=s=>crypto.createHash('sha256').update(s).digest('hex');
-const productSchema=z.object({name:z.string().trim().min(2).max(140),slug:z.string().trim().regex(/^[a-z0-9-]{3,70}$/),description:z.string().max(1500).default(''),website_url:z.string().url(),display_price_cents:z.number().int().min(0).safe().default(0),currency:z.string().regex(/^[A-Z]{3}$/).default('ZAR'),active:z.boolean().default(false),commission_bps:z.number().int().min(0).max(10000).default(2500),commission_mode:z.enum(['one_time','recurring']).default('one_time'),recurring_months:z.number().int().min(1).max(120).nullable().default(null),referral_days:z.number().int().min(1).max(365).default(30),hold_days:z.number().int().min(0).max(180).default(14)});
+const productSchema=z.object({payment_enabled:z.boolean().default(false),payment_return_url:z.string().url().nullable().default(null),name:z.string().trim().min(2).max(140),slug:z.string().trim().regex(/^[a-z0-9-]{3,70}$/),description:z.string().max(1500).default(''),website_url:z.string().url(),display_price_cents:z.number().int().min(0).safe().default(0),currency:z.string().regex(/^[A-Z]{3}$/).default('ZAR'),active:z.boolean().default(false),commission_bps:z.number().int().min(0).max(10000).default(2500),commission_mode:z.enum(['one_time','recurring']).default('one_time'),recurring_months:z.number().int().min(1).max(120).nullable().default(null),referral_days:z.number().int().min(1).max(365).default(30),hold_days:z.number().int().min(0).max(180).default(14)});
 const productFields=Object.keys(productSchema.shape);
-const selectPublicProduct=`id,slug,name,description,website_url,display_price_cents,currency,active,commission_bps,commission_mode,recurring_months,referral_days,hold_days`;
+const selectPublicProduct=`payment_enabled,payment_return_url,id,slug,name,description,website_url,display_price_cents,currency,active,commission_bps,commission_mode,recurring_months,referral_days,hold_days`;
 const productRule=p=>({commission_bps:p.commission_bps,commission_mode:p.commission_mode,recurring_months:p.recurring_months,referral_days:p.referral_days,hold_days:p.hold_days});
 
 app.get('/api/health',async c=>{
@@ -167,7 +168,7 @@ app.get('/api/admin/products',async c=>{
   return c.json({products:q.rows});
 });
 app.post('/api/admin/products',async c=>{
-  const parsed=productSchema.parse(await c.req.json());parsed.website_url=plainUrl(parsed.website_url);
+  const parsed=productSchema.parse(await c.req.json());parsed.website_url=plainUrl(parsed.website_url);if(parsed.payment_return_url){parsed.payment_return_url=plainUrl(parsed.payment_return_url);if(new URL(parsed.payment_return_url).origin!==new URL(parsed.website_url).origin)throw err('Payment return URL must belong to this product website',422);}
   const values=productFields.map(k=>parsed[k]);
   const cols=productFields.map(k=>`"${k}"`).join(',');const slots=productFields.map((_,i)=>`$${i+1}`).join(',');
   const result=await withTx(pool,async tx=>{
@@ -181,7 +182,7 @@ app.patch('/api/admin/products/:id',async c=>{
   const body=await c.req.json();const keys=Object.keys(body);
   if(!keys.length || keys.some(k=>!productFields.includes(k)))throw err('Invalid product fields',422);
   const p=await pool.query('select * from public.products where id=$1',[c.req.param('id')]);if(!p.rows[0])throw err('Product not found',404);
-  const validated=productSchema.parse({...p.rows[0],...body});validated.website_url=plainUrl(validated.website_url);
+  const validated=productSchema.parse({...p.rows[0],...body});validated.website_url=plainUrl(validated.website_url);if(validated.payment_return_url){validated.payment_return_url=plainUrl(validated.payment_return_url);if(new URL(validated.payment_return_url).origin!==new URL(validated.website_url).origin)throw err('Payment return URL must belong to this product website',422);}
   const old=p.rows[0];
   const updated=await withTx(pool,async tx=>{
     const assignments=productFields.map((k,i)=>`"${k}"=$${i+1}`).join(',');
@@ -268,6 +269,8 @@ app.post('/api/internal/settle',async c=>{
   if(!expected || candidate.length!==expected.length || !crypto.timingSafeEqual(Buffer.from(candidate),Buffer.from(expected)))throw err('Unauthorized',401);
   await approveMatured(pool);return c.json({ok:true});
 });
+
+attachPaymentEngine(app,{pool,productIntegration,requireUser,requireAdmin});
 
 app.onError((e,c)=>{
   const status=e.status||(e instanceof ZodError?422:500);
