@@ -8,6 +8,7 @@ import { createClient } from '@supabase/supabase-js';
 import pg from 'pg';
 import { z, ZodError } from 'zod';
 import { attachPaymentEngine } from './payment-engine.js';
+import { buildAffiliateLinks, registerDirectVisit } from './referral-links.js';
 import { approveMatured, cancelDraftPayout, createPayout, recordVerifiedPayment, recordVerifiedRefund, withTx, writeEvent } from './finance.js';
 
 const { Pool } = pg;
@@ -30,9 +31,9 @@ const plainUrl=(url)=>{const u=new URL(url);if(!['https:','http:'].includes(u.pr
 const slugify=s=>clean(s).toLowerCase().replace(/[^a-z0-9-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,70);
 const createCode=()=>crypto.randomBytes(14).toString('base64url');
 const hash=s=>crypto.createHash('sha256').update(s).digest('hex');
-const productSchema=z.object({payment_enabled:z.boolean().default(false),payment_return_url:z.string().url().nullable().default(null),name:z.string().trim().min(2).max(140),slug:z.string().trim().regex(/^[a-z0-9-]{3,70}$/),description:z.string().max(1500).default(''),website_url:z.string().url(),display_price_cents:z.number().int().min(0).safe().default(0),currency:z.string().regex(/^[A-Z]{3}$/).default('ZAR'),active:z.boolean().default(false),commission_bps:z.number().int().min(0).max(10000).default(2500),commission_mode:z.enum(['one_time','recurring']).default('one_time'),recurring_months:z.number().int().min(1).max(120).nullable().default(null),referral_days:z.number().int().min(1).max(365).default(30),hold_days:z.number().int().min(0).max(180).default(14)});
+const productSchema=z.object({direct_links_enabled:z.boolean().default(false),payment_enabled:z.boolean().default(false),payment_return_url:z.string().url().nullable().default(null),name:z.string().trim().min(2).max(140),slug:z.string().trim().regex(/^[a-z0-9-]{3,70}$/),description:z.string().max(1500).default(''),website_url:z.string().url(),display_price_cents:z.number().int().min(0).safe().default(0),currency:z.string().regex(/^[A-Z]{3}$/).default('ZAR'),active:z.boolean().default(false),commission_bps:z.number().int().min(0).max(10000).default(2500),commission_mode:z.enum(['one_time','recurring']).default('one_time'),recurring_months:z.number().int().min(1).max(120).nullable().default(null),referral_days:z.number().int().min(1).max(365).default(30),hold_days:z.number().int().min(0).max(180).default(14)});
 const productFields=Object.keys(productSchema.shape);
-const selectPublicProduct=`payment_enabled,payment_return_url,id,slug,name,description,website_url,display_price_cents,currency,active,commission_bps,commission_mode,recurring_months,referral_days,hold_days`;
+const selectPublicProduct=`direct_links_enabled,payment_enabled,payment_return_url,id,slug,name,description,website_url,display_price_cents,currency,active,commission_bps,commission_mode,recurring_months,referral_days,hold_days`;
 const productRule=p=>({commission_bps:p.commission_bps,commission_mode:p.commission_mode,recurring_months:p.recurring_months,referral_days:p.referral_days,hold_days:p.hold_days});
 
 app.get('/api/health',async c=>{
@@ -74,17 +75,17 @@ app.get('/api/catalog/products',async c=>{
 });
 app.post('/api/catalog/products/:id/enroll',async c=>{
   const me=c.get('me');const id=c.req.param('id');
-  const p=await pool.query('select id from public.products where id=$1 and active=true',[id]);
+  const p=await pool.query('select id,website_url,direct_links_enabled from public.products where id=$1 and active=true',[id]);
   if(!p.rows[0])throw err('Product unavailable',404);
   const newCode=createCode();
   const q=await pool.query(`insert into public.affiliate_links(partner_id,product_id,code) values($1,$2,$3)
     on conflict(partner_id,product_id) do update set code=public.affiliate_links.code returning *`,[me.user_id,id,newCode]);
-  return c.json({link:{...q.rows[0],url:`${process.env.PUBLIC_API_ORIGIN.replace(/\/$/,'')}/r/${q.rows[0].code}`}});
+  return c.json({link:{...q.rows[0],...buildAffiliateLinks(p.rows[0],q.rows[0].code,process.env.PUBLIC_API_ORIGIN)}});
 });
 app.get('/api/my/links',async c=>{
-  const q=await pool.query(`select al.id,al.code,al.created_at,al.product_id,p.name,p.slug,p.active,p.commission_bps,p.commission_mode,p.recurring_months
+  const q=await pool.query(`select al.id,al.code,al.created_at,al.product_id,p.name,p.slug,p.active,p.commission_bps,p.commission_mode,p.recurring_months,p.website_url,p.direct_links_enabled
     from public.affiliate_links al join public.products p on p.id=al.product_id where al.partner_id=$1 order by al.created_at desc`,[c.get('me').user_id]);
-  return c.json({links:q.rows.map(l=>({...l,url:`${process.env.PUBLIC_API_ORIGIN.replace(/\/$/,'')}/r/${l.code}`}))});
+  return c.json({links:q.rows.map(l=>({...l,...buildAffiliateLinks(l,l.code,process.env.PUBLIC_API_ORIGIN)}))});
 });
 app.get('/api/my/stats',async c=>{
   await approveMatured(pool);
@@ -108,6 +109,26 @@ app.get('/api/my/commissions',async c=>{
 app.get('/api/my/payouts',async c=>{
   const q=await pool.query('select id,currency,amount_cents,status,payment_reference,created_at,paid_at from public.payouts where partner_id=$1 order by created_at desc limit 100',[c.get('me').user_id]);
   return c.json({payouts:q.rows});
+});
+
+
+// Direct product-domain links call this endpoint from the *product website* to record
+// a referral click and receive ph_click. The browser never reports sales here.
+const directVisitHits=new Map();
+app.post('/api/v2/referrals/visit',async c=>{
+  const input=z.object({product_id:z.string().uuid(),referral_code:z.string().regex(/^[A-Za-z0-9_-]{10,80}$/)}).parse(await c.req.json());
+  const ip=(c.req.header('cf-connecting-ip')||c.req.header('x-forwarded-for')||'unknown').split(',')[0];
+  const key=hash(ip).slice(0,24),now=Date.now();
+  const hit=directVisitHits.get(key)||{count:0,until:now+60000};
+  if(now>hit.until){hit.count=0;hit.until=now+60000;}
+  if(++hit.count>60)throw err('Too many referral visits. Try again later.',429);
+  directVisitHits.set(key,hit);
+  if(directVisitHits.size>20000)directVisitHits.clear();
+  const result=await registerDirectVisit(pool,{
+    ...input,origin:c.req.header('origin'),allowedOrigins
+  });
+  c.header('Cache-Control','no-store');
+  return c.json(result,201);
 });
 
 // Public redirect. Product gets ph_ref + ph_click; the product site must persist them into verified checkout metadata.
