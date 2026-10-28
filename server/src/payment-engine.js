@@ -207,7 +207,7 @@ export function attachPaymentEngine(app,{pool,productIntegration,requireUser,req
    return c.json({offers:q.rows});
  });
  app.post('/api/admin/payment-offers',requireUser,requireAdmin,async c=>{
-   const data=offerSchema.extend({product_id:z.string().uuid()}).parse(await c.req.json());
+   const data=offerSchema.and(z.object({product_id:z.string().uuid()})).parse(await c.req.json());
    const p=await pool.query('select id,currency from public.products where id=$1',[data.product_id]);if(!p.rows[0])throw fail('Unknown product',404);
    const q=await pool.query(`insert into public.payment_offers(product_id,code,title,amount_cents,eligible_cents,currency,active)
     values($1,$2,$3,$4,$5,$6,$7) returning *`,[data.product_id,data.code,data.title,data.amount_cents,data.eligible_cents,p.rows[0].currency,data.active]);

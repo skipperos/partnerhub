@@ -31,7 +31,7 @@ export default function PaymentsAdmin({products,request,notify}) {
      <form className="editor-form" onSubmit={create}>
        <div className="form-grid">
          <label>Product<select value={offer.product_id} required onChange={e=>setOffer(s=>({...s,product_id:e.target.value}))}><option value="">Choose product</option>{products.map(p=><option key={p.id} value={p.id}>{p.name} ({p.currency})</option>)}</select></label>
-         <label>Offer code<input required pattern="[a-z0-9-]+" minLength={2} value={offer.code} placeholder="starter-pack" onChange={e=>setOffer(s=>({...s,code:e.target.value}))}/></label>
+         <label>Offer code<input required pattern="(?:[a-z0-9]|-)+" minLength={2} value={offer.code} placeholder="starter-pack" onChange={e=>setOffer(s=>({...s,code:e.target.value}))}/></label>
        </div>
        <label>Offer name<input required value={offer.title} onChange={e=>setOffer(s=>({...s,title:e.target.value}))} placeholder="Starter pack"/></label>
        <div className="form-grid">
